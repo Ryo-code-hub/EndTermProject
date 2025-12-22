@@ -1,0 +1,12 @@
+# UE5 Standard Ignore
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Script/
+Content/BlackMythWukong/
+.vscode/
+.vs/
+*.sln
+*.xcodeproj
+*.xcworkspace
