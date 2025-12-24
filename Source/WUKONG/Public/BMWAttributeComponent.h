@@ -6,23 +6,34 @@
 #include "Components/ActorComponent.h"
 #include "BMWAttributeComponent.generated.h"
 
+class AActor;
+class UBMWAttributeComponent;
 
-UCLASS( ClassGroup=(Custom), meta=(BlueprintSpawnableComponent) )
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnHealthChanged, AActor*, InstigatorActor, UBMWAttributeComponent*, OwningComp, float, NewHealth, float, Delta);
+
+UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class WUKONG_API UBMWAttributeComponent : public UActorComponent
 {
 	GENERATED_BODY()
 
-public:	
-	// Sets default values for this component's properties
+public:
 	UBMWAttributeComponent();
 
 protected:
-	// Called when the game starts
-	virtual void BeginPlay() override;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attributes")
+	float Health;
 
-public:	
-	// Called every frame
-	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Attributes")
+	float MaxHealth;
 
-		
+public:
+	UFUNCTION(BlueprintCallable, Category = "Attributes")
+	bool ApplyHealthChange(AActor* InstigatorActor, float Delta);
+
+	UFUNCTION(BlueprintCallable, Category = "Attributes")
+	float GetHealth() const;
+
+	UPROPERTY(BlueprintAssignable, Category = "Attributes")
+	FOnHealthChanged OnHealthChanged;
+
 };
