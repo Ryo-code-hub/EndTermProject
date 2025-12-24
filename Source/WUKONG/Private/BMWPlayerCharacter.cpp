@@ -9,6 +9,9 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 
+#include "Animation/AnimMontage.h" 
+#include "TimerManager.h" 
+#include "Engine/Engine.h" 
 
 ABMWPlayerCharacter::ABMWPlayerCharacter()
 {
@@ -64,14 +67,13 @@ void ABMWPlayerCharacter::BeginPlay()
 // 移动函数
 void ABMWPlayerCharacter::Move(const FInputActionValue& Value)
 {
+	//实时记录输入方向，供闪避逻辑使用
+	CurrentInputDirection = Value.Get<FVector2D>();
 	// 检查是否允许移动
 	if (!bCanMove)
 	{
 		return;
 	}
-
-	//实时记录输入方向，供闪避逻辑使用
-	CurrentInputDirection = Value.Get<FVector2D>();
 
 	FVector2D MovementVector = Value.Get<FVector2D>();
 
@@ -114,7 +116,6 @@ void ABMWPlayerCharacter::Look(const FInputActionValue& Value)
 		AddControllerYawInput(LookAxisVector.X);
 
 		// Y轴控制上下看 (Pitch)
-		// 如果你在 IMC 里没加 Negate，觉得反了，也可以在这里写 LookAxisVector.Y * -1.0f
 		AddControllerPitchInput(LookAxisVector.Y * -1.0f);
 	}
 }
@@ -170,9 +171,16 @@ void ABMWPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInput
 			EnhancedInputComponent->BindAction(WalkAction, ETriggerEvent::Started, this, &ABMWPlayerCharacter::ToggleWalking);
 		}
 
+		//绑定闪避
 		if (DashAction)
 		{
 			EnhancedInputComponent->BindAction(DashAction, ETriggerEvent::Started, this, &ABMWPlayerCharacter::Dash);
+		}
+
+		//绑定攻击
+		if (AttackAction)
+		{
+			EnhancedInputComponent->BindAction(AttackAction, ETriggerEvent::Started, this, &ABMWPlayerCharacter::AttackInput);
 		}
 	}
 }
@@ -267,7 +275,6 @@ void ABMWPlayerCharacter::JumpStarted()
 
 void ABMWPlayerCharacter::JumpEnded()
 {
-	// 调用父类停止跳跃
 	StopJumping();
 }
 
@@ -294,7 +301,6 @@ void ABMWPlayerCharacter::Landed(const FHitResult& Hit)
 }
 
 //  ****闪避辅助函数****
-// 复刻蓝图里的 Select/Branch 逻辑
 EDodgeDirection ABMWPlayerCharacter::CalculateDodgeDirection()
 {
 	// 如果没有输入 (0,0)，默认向后
@@ -335,85 +341,109 @@ void ABMWPlayerCharacter::TogglePerfectWindow()
 //****核心闪避逻辑****
 void ABMWPlayerCharacter::DodgeStarted()
 {
-	// 1. 检查是否在冷却或其他状态 (如果需要)
-	// if (!bCanMove) return; // 视设计而定，有时候闪避可以取消硬直
+	// 1. 闪避取消逻辑 (Animation Cancel)
+	if (bIsAttacking)
+	{
+		StopAnimMontage(nullptr);
+		SoftResetAttackState();
+
+		GetWorldTimerManager().SetTimer(
+			TimerHandle_ComboPreserve,
+			this,
+			&ABMWPlayerCharacter::ResetCombo, // 时间到了就调用彻底重置
+			ComboPreserveTime,
+			false
+
+		);
+		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 1.f, FColor::Green, TEXT("Combo Preserved!"));
+
+	}
+
+	// 落地硬直检查
+	if (!bCanMove && GetCharacterMovement()->IsMovingOnGround())
+	{
+		bCanMove = true;
+	}
+
+	// 如果还没恢复移动（比如在空中），则不能闪避
+	if (!bCanMove) return;
 
 	// 2. 计算方向
 	EDodgeDirection Direction = CalculateDodgeDirection();
-
 	UAnimMontage* MontageToPlay = nullptr;
 
 	// 3. 分支判断：完美 vs 普通
 	if (bIsPerfectDodgeWindow)
 	{
-		// === 完美闪避逻辑 ===
+		// === 完美闪避逻辑 (保持不变) ===
 		switch (Direction)
 		{
 			case EDodgeDirection::Forward:
-				MontageToPlay = AM_Dodge_perfect_F;
-				break;
+				MontageToPlay = AM_Dodge_perfect_F; break;
 			case EDodgeDirection::Backward:
-				MontageToPlay = AM_Dodge_perfect_B;
-				break;
+				MontageToPlay = AM_Dodge_perfect_B; break;
 			case EDodgeDirection::Left:
-				MontageToPlay = AM_Dodge_perfect_L;
-				break;
+				MontageToPlay = AM_Dodge_perfect_L; break;
 			case EDodgeDirection::Right:
-				MontageToPlay = AM_Dodge_perfect_R;
-				break;
-			default:
-				break;
+				MontageToPlay = AM_Dodge_perfect_R; break;
+			default: break;
 		}
 
-		// 播放并重置
 		if (MontageToPlay)
 		{
 			PlayAnimMontage(MontageToPlay);
-			DodgeCount = 0; // 完美闪避后重置连段
-			// 可以在这里加特效、慢动作逻辑
+			DodgeCount = 0; // 完美闪避后重置
 		}
 	}
 	else
 	{
-		// === 普通多段闪避逻辑 ===
-
-		// 根据方向和连段数选择蒙太奇
+		// === 普通多段闪避逻辑  ===
 		switch (Direction)
 		{
 			case EDodgeDirection::Forward:
-				if (DodgeCount == 0) MontageToPlay = AM_Dodge_F_1;
-				if (DodgeCount == 1) MontageToPlay = AM_Dodge_F_2;
-				else MontageToPlay = AM_Dodge_F_3; // 第3段及以后都播这个
+				if (DodgeCount == 0)      MontageToPlay = AM_Dodge_F_1;
+				else if (DodgeCount == 1) MontageToPlay = AM_Dodge_F_2; // 必须用 else if
+				else                      MontageToPlay = AM_Dodge_F_3; // 2及以上播第3段
 				break;
+
 			case EDodgeDirection::Backward:
-				if (DodgeCount == 0) MontageToPlay = AM_Dodge_B_1;
-				if (DodgeCount == 1) MontageToPlay = AM_Dodge_B_2;
-				else MontageToPlay = AM_Dodge_B_3; // 第3段及以后都播这个
+				if (DodgeCount == 0)      MontageToPlay = AM_Dodge_B_1;
+				else if (DodgeCount == 1) MontageToPlay = AM_Dodge_B_2;
+				else                      MontageToPlay = AM_Dodge_B_3;
 				break;
+
 			case EDodgeDirection::Left:
-				if (DodgeCount == 0) MontageToPlay = AM_Dodge_L_1;
-				if (DodgeCount == 1) MontageToPlay = AM_Dodge_L_2;
-				else MontageToPlay = AM_Dodge_L_3; // 第3段及以后都播这个
+				if (DodgeCount == 0)      MontageToPlay = AM_Dodge_L_1;
+				else if (DodgeCount == 1) MontageToPlay = AM_Dodge_L_2;
+				else                      MontageToPlay = AM_Dodge_L_3;
 				break;
+
 			case EDodgeDirection::Right:
-				if (DodgeCount == 0) MontageToPlay = AM_Dodge_R_1;
-				if (DodgeCount == 1) MontageToPlay = AM_Dodge_R_2;
-				else MontageToPlay = AM_Dodge_R_3; // 第3段及以后都播这个
+				if (DodgeCount == 0)      MontageToPlay = AM_Dodge_R_1;
+				else if (DodgeCount == 1) MontageToPlay = AM_Dodge_R_2;
+				else                      MontageToPlay = AM_Dodge_R_3;
 				break;
-			default:
-				break;
+
+			default: break;
 		}
 
 		// 播放逻辑
 		if (MontageToPlay)
 		{
+			// 打断上一个动作，保证连闪的手感
+			StopAnimMontage(nullptr);
+
 			PlayAnimMontage(MontageToPlay);
 
-			// 连段计数 +1
+			// 计数增加
 			DodgeCount++;
 
-			// 设置重置计时器 (1.5秒后重置)
-			// ClearTimer 是为了防止狂按时计时器还没跑完就触发重置
+			if (DodgeCount > 2)
+			{
+				DodgeCount = 0;
+			}
+
+			// 设置重置计时器
 			GetWorldTimerManager().ClearTimer(TimerHandle_ResetDodge);
 			GetWorldTimerManager().SetTimer(TimerHandle_ResetDodge, this, &ABMWPlayerCharacter::ResetDodgeCount, 1.5f, false);
 		}
@@ -474,4 +504,132 @@ void ABMWPlayerCharacter::StopDashing()
 {
 	// 冷却结束，允许下次冲刺
 	bIsDashing = false;
+}
+
+
+
+//****attacking****
+// 1. 玩家按下左键
+void ABMWPlayerCharacter::AttackInput()
+{
+	if (!bCanMove && !bIsAttacking) return;
+
+	if (bIsAttacking)
+	{
+		// 情况A：还没到 ContinueCombo 点，先存着
+		if (!bReadyForNextCombo)
+		{
+			bHasSavedAttack = true;
+		}
+		// 情况B：
+		else
+		{
+			PerformComboAttack();
+		}
+	}
+	else
+	{
+		PerformComboAttack();
+	}
+}
+
+// 2. 执行攻击动作 (核心)
+void ABMWPlayerCharacter::PerformComboAttack()
+{
+	if (AttackMontages.Num() == 0) return;
+
+	// 确保 Index 不越界 (虽然逻辑上会重置，但加个保险)
+	if (AttackMontages.IsValidIndex(ComboIndex))
+	{
+		// 1. 锁死状态
+		bIsAttacking = true;
+		bCanMove = false; // 攻击时不能移动(硬直)
+		bHasSavedAttack = false; // 消耗掉缓存
+		bReadyForNextCombo = false;
+
+		// 2. 播放对应的蒙太奇
+		PlayAnimMontage(AttackMontages[ComboIndex]);
+
+		// 3. 准备下一段的下标
+		// 如果当前是 0，下一次就是 1。如果是 3 (数组长度4)，下一次变成 0
+		ComboIndex++;
+		if (ComboIndex >= AttackMontages.Num())
+		{
+			ComboIndex = 0;
+		}
+	}
+}
+
+// 3. 连招检测 (将被 AnimNotify 调用)
+// 就像接力棒：动画播到这一帧，问一下C++：“玩家刚才按键了吗？”
+void ABMWPlayerCharacter::ContinueCombo()
+{
+	if (bHasSavedAttack)
+	{
+		PerformComboAttack();
+	}
+	else
+	{
+		bReadyForNextCombo = true;
+	}
+}
+
+// 4. 重置连招 (将被 AnimNotify 或 BlendOut 调用)
+void ABMWPlayerCharacter::ResetCombo()
+{
+	ComboIndex = 0;
+	bIsAttacking = false;
+	bHasSavedAttack = false;
+	bReadyForNextCombo = false;
+	bCanMove = true; // 恢复移动
+}
+
+void ABMWPlayerCharacter::StartWeaponCollision()
+{
+	// 每次挥刀开始时，清空受击者名单
+	HitActors.Empty();
+}
+
+void ABMWPlayerCharacter::EndWeaponCollision()
+{
+	// 可以在这里做一些收尾工作，比如重置特效等
+	HitActors.Empty();
+}
+
+void ABMWPlayerCharacter::ProcessHit(FHitResult HitResult)
+{
+	AActor* HitActor = HitResult.GetActor();
+
+	// 1. 如果打到的是自己，忽略
+	if (!HitActor || HitActor == this) return;
+
+	// 2. 如果这个人这一刀已经打过了，忽略
+	if (HitActors.Contains(HitActor)) return;
+
+	// 3. 记录这个人
+	HitActors.Add(HitActor);
+
+	// 4. 应用伤害 (这里先打印，后面再接伤害系统)
+	if (GEngine)
+	{
+		FString DebugMsg = FString::Printf(TEXT("Hit Enemy: %s"), *HitActor->GetName());
+		GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Red, DebugMsg);
+	}
+
+	// TODO: UGameplayStatics::ApplyDamage(...)
+	// 播放打击音效、特效、顿帧(HitStop)等
+
+}
+
+//闪避保留连击
+void ABMWPlayerCharacter::SoftResetAttackState()
+{
+	// 重置攻击状态标记
+	bIsAttacking = false;
+	bHasSavedAttack = false;
+	bReadyForNextCombo = false; 
+
+	// 恢复移动能力 
+	bCanMove = true;
+
 }
