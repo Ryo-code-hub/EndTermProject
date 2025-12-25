@@ -7,6 +7,7 @@
 #include "BMWBaseCharacter.generated.h"
 
 class UBMWAttributeComponent;
+class UBehaviorTree;
 
 UCLASS()
 class WUKONG_API ABMWBaseCharacter : public ACharacter
@@ -32,6 +33,9 @@ protected:
 public:	
 	UFUNCTION(BlueprintCallable, Category = "Attributes")
 	UBMWAttributeComponent* GetAttributeComponent() const { return AttributeComp; }
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "AI")
+	class UBehaviorTree* BehaviorTreeAsset;
 
 	UFUNCTION(BlueprintCallable, Category = "State")
 	bool IsAlive() const { return !bIsDead; }
