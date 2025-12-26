@@ -12,6 +12,8 @@
 #include "Animation/AnimMontage.h" 
 #include "TimerManager.h" 
 #include "Engine/Engine.h" 
+#include "NiagaraComponent.h"
+#include "NiagaraFunctionLibrary.h"
 
 ABMWPlayerCharacter::ABMWPlayerCharacter()
 {
@@ -35,20 +37,32 @@ ABMWPlayerCharacter::ABMWPlayerCharacter()
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
 	CameraBoom->SetupAttachment(RootComponent);
 	CameraBoom->TargetArmLength = 400.0f; // 臂长
-	CameraBoom->bUsePawnControlRotation = true; 
+	CameraBoom->bUsePawnControlRotation = true;
 
 	// 3. 创建摄像机
 	FollowCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("FollowCamera"));
 	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName); // 挂在弹簧臂末端
 	FollowCamera->bUsePawnControlRotation = false;
+
+	//4.创建特效
+	// 创建特效组件 - 上端
+	WeaponFXComp_Top = CreateDefaultSubobject<UNiagaraComponent>(TEXT("WeaponFX_Top"));
+	WeaponFXComp_Top->SetupAttachment(GetMesh(), FName("FX_Staff_Top"));
+	WeaponFXComp_Top->bAutoActivate = false; // 默认不开启，或者设为 true 看你需求
+
+	// 创建特效组件 - 下端
+	WeaponFXComp_Bottom = CreateDefaultSubobject<UNiagaraComponent>(TEXT("WeaponFX_Bottom"));
+	WeaponFXComp_Bottom->SetupAttachment(GetMesh(), FName("FX_Staff_Bottom"));
+	WeaponFXComp_Bottom->bAutoActivate = false;
 }
+
 
 // BeginPlay
 void ABMWPlayerCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// 添加输入映射上下文 (Add Mapping Context)
+	// 添加输入映射上下文
 	if (APlayerController* PlayerController = Cast<APlayerController>(Controller))
 	{
 		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()))
@@ -62,6 +76,23 @@ void ABMWPlayerCharacter::BeginPlay()
 
 	// 记录原始奔跑速度
 	DefaultRunSpeed = GetCharacterMovement()->MaxWalkSpeed;
+
+	// 如果蓝图里填了特效资产，就应用给组件
+	if (WeaponFireFX)
+	{
+		WeaponFXComp_Top->SetAsset(WeaponFireFX);
+		WeaponFXComp_Bottom->SetAsset(WeaponFireFX);
+
+		// 激活特效 (让它显示出来)
+		WeaponFXComp_Top->Activate();
+		WeaponFXComp_Bottom->Activate();
+	}
+
+	// 获取初始盆骨高度 (相对于世界坐标的 Z)
+	if (GetMesh())
+	{
+		DefaultPelvisZ = GetMesh()->GetSocketLocation(FName("pelvis")).Z - GetActorLocation().Z;
+	}
 }
 
 // 移动函数
@@ -182,13 +213,28 @@ void ABMWPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInput
 		{
 			EnhancedInputComponent->BindAction(AttackAction, ETriggerEvent::Started, this, &ABMWPlayerCharacter::AttackInput);
 		}
+
+		//绑定重击
+		if (HeavyAttackAction)
+		{
+			// 按下开始蓄力
+			EnhancedInputComponent->BindAction(HeavyAttackAction, ETriggerEvent::Started, this, &ABMWPlayerCharacter::HeavyAttackStarted);
+			// 松开释放攻击
+			EnhancedInputComponent->BindAction(HeavyAttackAction, ETriggerEvent::Completed, this, &ABMWPlayerCharacter::HeavyAttackReleased);
+		}
+
+		//绑定技能
+		if (SpecialSkillAction)
+		{
+			EnhancedInputComponent->BindAction(SpecialSkillAction, ETriggerEvent::Started, this, &ABMWPlayerCharacter::PerformSpecialSkill);
+		}
 	}
 }
 
 // Tick 函数
 void ABMWPlayerCharacter::Tick(float DeltaTime)
 {
-	Super::Tick(DeltaTime); 
+	Super::Tick(DeltaTime);
 
 	// === 逻辑 1：锁定模式下的强制朝向===
 	if (bIsLockMode)
@@ -226,6 +272,79 @@ void ABMWPlayerCharacter::Tick(float DeltaTime)
 			// 速度降回来后，强制设为默认值
 			GetCharacterMovement()->MaxWalkSpeed = DefaultRunSpeed;
 		}
+	}
+
+	// === 逻辑3：蓄力逻辑 ===
+	if (bIsCharging)
+	{
+		// 1. 累加时间
+		CurrentChargeTime += DeltaTime;
+
+		// 2. 计算当前阶数
+		// 比如：0.2s内是0阶，2s是1阶，4s是2阶，6s是3阶
+		if (CurrentChargeTime >= ShortPressThreshold)
+		{
+			// 这里的逻辑是：时间越长，阶数越高
+			if (CurrentChargeTime >= ChargeTimePerStage * 3) CurrentChargeStage = 3;
+			else if (CurrentChargeTime >= ChargeTimePerStage * 2) CurrentChargeStage = 2;
+			else if (CurrentChargeTime >= ChargeTimePerStage * 1) CurrentChargeStage = 1;
+		}
+		// 3. 处理转向 (题目要求：不能移动但可以转向)
+		HandleChargeRotation(DeltaTime);
+
+		//4.蓄力时特效
+		if (CurrentChargeStage >= 1)
+		{
+			// A. 强制开启特效 (如果你是从0豆开始蓄，到了1阶就要亮起来)
+			if (WeaponFXComp_Top && !WeaponFXComp_Top->IsActive()) WeaponFXComp_Top->Activate();
+			if (WeaponFXComp_Bottom && !WeaponFXComp_Bottom->IsActive()) WeaponFXComp_Bottom->Activate();
+
+			// B. 根据当前蓄到的阶数变色
+			FLinearColor TempColor = FocusColor_Level1; // 默认1阶白
+
+			if (CurrentChargeStage == 2) TempColor = FocusColor_Level2;      // 2阶金
+			else if (CurrentChargeStage >= 3) TempColor = FocusColor_Level3; // 3阶红
+
+			// C. 应用颜色
+			SetWeaponFireColor(TempColor);
+		}
+	}
+
+
+	// === 逻辑4：镜头高度跟随逻辑 ===
+
+	float TargetOffsetZ = 0.0f; // 默认偏移是 0
+
+	if (bFollowPelvisZ && GetMesh())
+	{
+		// 1. 获取当前盆骨的世界高度
+		float CurrentPelvisZ = GetMesh()->GetSocketLocation(FName("pelvis")).Z;
+
+		// 2. 获取当前胶囊体的世界高度
+		float CapsuleZ = GetActorLocation().Z;
+
+		float HeightDifference = (CurrentPelvisZ - CapsuleZ) - DefaultPelvisZ;
+
+		// 只在向上飞时跟随，或者上下都跟随
+		TargetOffsetZ = HeightDifference;
+	}
+
+	// 4. 平滑应用给弹簧臂 (插值)
+	float NewOffsetZ = FMath::FInterpTo(CameraBoom->TargetOffset.Z, TargetOffsetZ, DeltaTime, 10.0f);
+	CameraBoom->TargetOffset.Z = NewOffsetZ;
+
+	// 在 Tick 函数的镜头逻辑里
+	if (bFollowPelvisZ && GetMesh())
+	{
+		float CurrentPelvisZ = GetMesh()->GetSocketLocation(FName("Pelvis")).Z; // 记得改骨骼名
+		float CapsuleZ = GetActorLocation().Z;
+		float HeightDifference = (CurrentPelvisZ - CapsuleZ) - DefaultPelvisZ;
+
+		// [调试代码]
+		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 0.0f, FColor::Red,
+			FString::Printf(TEXT("Diff: %f | BoomZ: %f"), HeightDifference, CameraBoom->TargetOffset.Z));
+
+		TargetOffsetZ = HeightDifference;
 	}
 }
 
@@ -283,11 +402,11 @@ void ABMWPlayerCharacter::Landed(const FHitResult& Hit)
 {
 	Super::Landed(Hit);
 
-	// 1. 落地瞬间，依然禁止移动
-	bCanMove = false;
-
+	// 1. 获取落地前一瞬间的垂直速度 (Z轴)
+	// 因为下落时 Z 是负数，我们取负值变成正数，或者用 FMath::Abs
+	float FallingSpeed = -GetCharacterMovement()->GetLastUpdateVelocity().Z;
 	// 2. 播放落地蒙太奇
-	if (LandMontage)
+	if (FallingSpeed >= LandHardThreshold)
 	{
 		PlayAnimMontage(LandMontage);
 	}
@@ -609,6 +728,7 @@ void ABMWPlayerCharacter::ProcessHit(FHitResult HitResult)
 	// 3. 记录这个人
 	HitActors.Add(HitActor);
 
+	AddFocus(0.34f);
 	// 4. 应用伤害 (这里先打印，后面再接伤害系统)
 	if (GEngine)
 	{
@@ -627,9 +747,208 @@ void ABMWPlayerCharacter::SoftResetAttackState()
 	// 重置攻击状态标记
 	bIsAttacking = false;
 	bHasSavedAttack = false;
-	bReadyForNextCombo = false; 
+	bReadyForNextCombo = false;
 
 	// 恢复移动能力 
 	bCanMove = true;
 
+}
+
+
+//重击逻辑
+void ABMWPlayerCharacter::HeavyAttackStarted()
+{
+	// 状态检查：如果正在攻击、在空中、或者闪避中，不允许
+	if (bIsAttacking || !bCanMove || GetCharacterMovement()->IsFalling()) return;
+
+	// 1. 进入蓄力状态
+	bIsCharging = true;
+	bCanMove = false; // 禁止移动
+	bIsAttacking = true; // 视为攻击状态，防止被其他逻辑打断
+
+	// 2. 获取当前棍势等级 (向下取整)
+	int32 StartLevel = FMath::FloorToInt(CurrentFocusPoint);
+
+	// 限制一下，普通重击蓄力最多到3阶 (4阶是大招)
+	if (StartLevel > 3) StartLevel = 3;
+
+	// 3. 设置初始时间
+	CurrentChargeTime = StartLevel * ChargeTimePerStage;
+
+	// 4. 设置初始阶数
+	CurrentChargeStage = StartLevel;
+
+	// 5. 播放蓄力循环动画
+	if (AM_Charge_Loop)
+	{
+		PlayAnimMontage(AM_Charge_Loop);
+	}
+	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Cyan, FString::Printf(TEXT("Charge Start Level: %d"), StartLevel));
+}
+
+
+void ABMWPlayerCharacter::HandleChargeRotation(float DeltaTime)
+{
+	// 情况A：锁定模式 -> 始终朝向敌人/摄像机前方
+	if (bIsLockMode)
+	{
+		if (Controller)
+		{
+			FRotator TargetRotation = Controller->GetControlRotation();
+			TargetRotation.Pitch = 0.0f;
+			TargetRotation.Roll = 0.0f;
+			// 平滑转向
+			FRotator NewRotation = FMath::RInterpTo(GetActorRotation(), TargetRotation, DeltaTime, 10.0f);
+			SetActorRotation(NewRotation);
+		}
+	}
+	// 情况B：自由模式 -> 朝向输入方向 (WASD)
+	else
+	{
+		if (!CurrentInputDirection.IsZero() && Controller)
+		{
+			const FRotator YawRotation(0, Controller->GetControlRotation().Yaw, 0);
+			const FVector ForwardVector = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
+			const FVector RightVector = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
+
+			FVector TargetDirection = (ForwardVector * CurrentInputDirection.Y) + (RightVector * CurrentInputDirection.X);
+			TargetDirection.Normalize();
+
+			FRotator TargetRot = TargetDirection.Rotation();
+
+			// 平滑转向
+			FRotator NewRot = FMath::RInterpTo(GetActorRotation(), TargetRot, DeltaTime, 5.0f); // 5.0 转得慢一点，有蓄力的厚重感
+			SetActorRotation(NewRot);
+		}
+	}
+}
+
+void ABMWPlayerCharacter::HeavyAttackReleased()
+{
+	if (!bIsCharging) return;
+
+	// 1. 结束蓄力状态
+	bIsCharging = false;
+	// bIsAttacking 保持为 true
+
+	// 2. 停止蓄力循环动画
+	StopAnimMontage(AM_Charge_Loop);
+
+	// 3. 根据阶数选择蒙太奇
+	UAnimMontage* MontageToPlay = nullptr;
+
+	switch (CurrentChargeStage)
+	{
+		case 0: MontageToPlay = AM_Heavy_Normal; break;
+		case 1: MontageToPlay = AM_Heavy_Stage1; break;
+		case 2: MontageToPlay = AM_Heavy_Stage2; break;
+		case 3: MontageToPlay = AM_Heavy_Stage3; break;
+		default: MontageToPlay = AM_Heavy_Stage3; break;
+	}
+
+	// 4. 播放攻击
+	if (MontageToPlay)
+	{
+		PlayAnimMontage(MontageToPlay);
+		ConsumeAllFocus();
+	}
+	else
+	{
+		ResetCombo();
+	}
+}
+
+//特效改变函数
+void ABMWPlayerCharacter::SetWeaponFireColor(FLinearColor NewColor)
+{
+	if (WeaponFXComp_Top)
+	{
+		WeaponFXComp_Top->SetNiagaraVariableLinearColor(FString("FireColor"), NewColor);
+	}
+	if (WeaponFXComp_Bottom)
+	{
+		WeaponFXComp_Bottom->SetNiagaraVariableLinearColor(FString("FireColor"), NewColor);
+	}
+}
+
+void ABMWPlayerCharacter::AddFocus(float Amount)
+{
+	// 1. 增加点数并限制最大值
+	CurrentFocusPoint = FMath::Clamp(CurrentFocusPoint + Amount, 0.0f, MaxFocusPoint);
+
+	// 2. 更新特效显示
+	UpdateFocusVFX();
+
+	// (可选) 调试打印
+	// if (GEngine) GEngine->AddOnScreenDebugMessage(50, 2.f, FColor::White, FString::Printf(TEXT("Focus: %.2f"), CurrentFocusPoint));
+}
+
+void ABMWPlayerCharacter::UpdateFocusVFX()
+{
+	// 获取当前整数层级 (0, 1, 2, 3, 4)
+	int32 FocusLevel = FMath::FloorToInt(CurrentFocusPoint);
+
+	// 0层：关闭特效
+	if (FocusLevel < 1)
+	{
+		if (WeaponFXComp_Top) WeaponFXComp_Top->Deactivate();
+		if (WeaponFXComp_Bottom) WeaponFXComp_Bottom->Deactivate();
+		return;
+	}
+
+	// >=1层：开启特效
+	if (WeaponFXComp_Top) WeaponFXComp_Top->Activate();
+	if (WeaponFXComp_Bottom) WeaponFXComp_Bottom->Activate();
+
+	// 根据层级设置颜色
+	FLinearColor TargetColor = FocusColor_Level1; // 默认1级白
+
+	if (FocusLevel == 2) TargetColor = FocusColor_Level2; // 2级金
+	else if (FocusLevel >= 3) TargetColor = FocusColor_Level3; // 3级/4级红
+
+	// 调用我们之前写的变色函数
+	SetWeaponFireColor(TargetColor);
+}
+
+void ABMWPlayerCharacter::ConsumeAllFocus()
+{
+	CurrentFocusPoint = 0.0f;
+}
+
+void ABMWPlayerCharacter::TurnOffFocusVFX()
+{
+	if (WeaponFXComp_Top) WeaponFXComp_Top->Deactivate();
+	if (WeaponFXComp_Bottom) WeaponFXComp_Bottom->Deactivate();
+	UpdateFocusVFX();
+}
+
+void ABMWPlayerCharacter::PerformSpecialSkill()
+{
+	// 1. 检查条件
+	if (bIsAttacking || !bCanMove || GetCharacterMovement()->IsFalling()) return;
+
+	// 2. 检查棍势是否满 4 豆
+	if (CurrentFocusPoint < 4.0f)
+	{
+		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Red, TEXT("Need 4 Focus Points!"));
+		return;
+	}
+
+	// 3. 播放大招
+	if (AM_Heavy_Special)
+	{
+		bIsAttacking = true;
+		bCanMove = false;
+
+		PlayAnimMontage(AM_Heavy_Special);
+
+		// 4. 清空棍势
+		ConsumeAllFocus();
+	}
+}
+
+//开关镜头移位
+void ABMWPlayerCharacter::SetCameraFollowPelvis(bool bEnable)
+{
+	bFollowPelvisZ = bEnable;
 }

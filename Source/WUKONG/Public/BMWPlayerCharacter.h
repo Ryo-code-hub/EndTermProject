@@ -14,6 +14,8 @@ class UInputAction;
 class USpringArmComponent;
 class UCameraComponent;
 class UAnimMontage;
+class UNiagaraComponent;
+class UNiagaraSystem;
 
 // 定义闪避方向枚举
 UENUM(BlueprintType)
@@ -115,7 +117,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Animation)
 	UAnimMontage* LandMontage;
 
-	// === 蒙太奇资产
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Movement Settings")
+	float LandHardThreshold = 900.0f;
+
+	// === 蒙太奇资产 ===
 
 //前闪
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Montage")
@@ -216,17 +221,145 @@ public:
 
 
 
-	protected:
-		//连招保留计时器句柄
-		FTimerHandle TimerHandle_ComboPreserve;
+protected:
+	//连招保留计时器句柄
+	FTimerHandle TimerHandle_ComboPreserve;
 
-		//  连招保留窗口时间 
-		UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat")
-		float ComboPreserveTime = 1.5f;
+	//  连招保留窗口时间 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat")
+	float ComboPreserveTime = 1.5f;
 
 protected:
-	// 软重置：只重置状态（让你可以动），但不重置 ComboIndex
+	// 软重置：只重置状态
 	void SoftResetAttackState();
+
+
+	//重击
+protected:
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
+	UInputAction* HeavyAttackAction;
+
+	// === 蓄力攻击参数 ===
+
+	// 每一阶蓄力需要的时间 (秒)
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|HeavyAttack")
+	float ChargeTimePerStage = 2.0f;
+
+	// 短按判定的阈值 (小于这个时间算普通重击)
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|HeavyAttack")
+	float ShortPressThreshold = 0.2f;
+
+	// === 蓄力状态变量 ===
+	bool bIsCharging = false;       // 是否正在蓄力
+	float CurrentChargeTime = 0.0f; // 当前蓄力了多久
+	int32 CurrentChargeStage = 0;   // 当前阶数 (0=普通, 1, 2, 3)
+
+	// === 蒙太奇资源 ===
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Montage")
+	UAnimMontage* AM_Charge_Loop;    // 蓄力循环动作
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Montage")
+	UAnimMontage* AM_Heavy_Normal;   // 0阶：短按重击
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Montage")
+	UAnimMontage* AM_Heavy_Stage1;   // 1阶
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Montage")
+	UAnimMontage* AM_Heavy_Stage2;   // 2阶
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Montage")
+	UAnimMontage* AM_Heavy_Stage3;   // 3阶
+
+protected:
+	// 按下右键：开始蓄力
+	void HeavyAttackStarted();
+
+	// 松开右键：释放攻击
+	void HeavyAttackReleased();
+
+	//  辅助：处理蓄力时的转向
+	void HandleChargeRotation(float DeltaTime);
+
+	//武器特效
+protected:
+	// 武器特效资产
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|VFX")
+	UNiagaraSystem* WeaponFireFX;
+
+	// 武器上端的特效组件
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|VFX")
+	UNiagaraComponent* WeaponFXComp_Top;
+
+	// 武器下端的特效组件
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|VFX")
+	UNiagaraComponent* WeaponFXComp_Bottom;
+
+public:
+	// 用于后续切换形态的函数
+	UFUNCTION(BlueprintCallable)
+	void SetWeaponFireColor(FLinearColor NewColor);
+
+
+
+	//技能和棍势
+protected:
+	//超级重击技能输入 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
+	UInputAction* SpecialSkillAction;
+
+	// 超级重击蒙太奇 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|Montage")
+	UAnimMontage* AM_Heavy_Special;
+
+
+	// 当前棍势点数 (0.0 ~ 4.0)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat|Focus")
+	float CurrentFocusPoint = 0.0f;
+
+	// 最大棍势
+	float MaxFocusPoint = 4.0f;
+
+	//特效颜色配置
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|VFX")
+	FLinearColor FocusColor_Level1 = FLinearColor(50.f, 50.f, 50.f); // 白/银 (高亮)
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|VFX")
+	FLinearColor FocusColor_Level2 = FLinearColor(50.f, 40.f, 0.f);  // 金色
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Combat|VFX")
+	FLinearColor FocusColor_Level3 = FLinearColor(50.f, 0.f, 0.f);   // 红色
+
+public:
+	// 供 Notify 调用的函数：增加棍势
+	// Amount = 0.34 (约等于1/3)
+	UFUNCTION(BlueprintCallable)
+	void AddFocus(float Amount);
+
+protected:
+	//更新特效状态 (根据点数变色)
+	void UpdateFocusVFX();
+
+	// 消耗所有棍势 
+	void ConsumeAllFocus();
+	//  专门用于关闭特效的函数
+	UFUNCTION(BlueprintCallable)
+	void TurnOffFocusVFX();
+
+	//  释放大招
+	void PerformSpecialSkill();
+
+	//控制技能镜头
+protected:
+	//是否开启镜头跟随盆骨高度 (在飞起动作时开启)
+	bool bFollowPelvisZ = false;
+
+	//记录盆骨的标准高度 (站立时盆骨离地的高度，用于计算差值)
+	float DefaultPelvisZ = 0.0f;
+
+public:
+	// 供 Notify 调用：开启/关闭跟随
+	UFUNCTION(BlueprintCallable)
+	void SetCameraFollowPelvis(bool bEnable);
 };
 
 
