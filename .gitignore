@@ -1,0 +1,24 @@
+# UE5 Standard Ignore
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Script/
+Content/Collections/
+Content/Developers/
+Content/VaultCache/
+Content/BlackMythWukong/
+Content/Enemy_Goblin/
+Content/Enemy_Deer/
+Content/Enemy_Zombie/
+Content/EuropeanBeech/
+Content/MSPresetsg/
+Content/ProceduralNaturePack/
+Content/Media/
+Content/Movies/
+Content/Audio/
+.vscode/
+.vs/
+*.sln
+*.xcodeproj
+*.xcworkspace
